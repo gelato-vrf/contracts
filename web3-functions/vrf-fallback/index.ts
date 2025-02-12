@@ -70,15 +70,14 @@ Web3Function.onRun(async (context: Web3FunctionContext) => {
     } catch (error) {
       return {
         canExec: false,
-        message: `Fail to getLogs ${fromBlock}-${toBlock}: ${
-          (error as Error).message
-        }.`,
+        message: `Fail to getLogs ${fromBlock}-${toBlock}: ${(error as Error).message
+          }.`,
       };
     }
   }
 
-  // h: blockHash, t: timestamp, i: index, r: requestId
-  let requests: { h: string; t: number; i: number; r: string }[] = JSON.parse(
+  // h: blockHash, t: timestamp, i: index, r: requestId, o: original keccak256 hash
+  let requests: { h: string; t: number; i: number; r: string; o: string }[] = JSON.parse(
     (await storage.get("requests")) ?? "[]"
   );
 
@@ -96,12 +95,14 @@ Web3Function.onRun(async (context: Web3FunctionContext) => {
     const requestId: BigNumber = decoded[0];
 
     const timestamp = Math.floor(getRoundTime(round.toNumber()) / 1000);
+    const originalHash = utils.keccak256(utils.defaultAbiCoder.encode(["uint256", "bytes"], [round, consumerData]));
 
     requests.push({
       h: log.blockHash,
       t: timestamp,
       i: log.logIndex,
       r: requestId.toString(),
+      o: originalHash,
     });
   }
 
@@ -121,9 +122,28 @@ Web3Function.onRun(async (context: Web3FunctionContext) => {
   requests = requests.filter((_, index) => {
     if (index >= MAX_MULTICALL_REQUESTS) return true; // Keep requests that were not included in multicall.
     // Converting returnData to boolean. returnData is in bytes32 hexadecimal form (0x..00 or 0x..01).
-    const isRequestPending = !!parseInt(returnData[index]);
+    const isRequestPending = !!Number.parseInt(returnData[index]);
     return isRequestPending;
   });
+
+  // filter out invalid requests
+  const zeroHashRequests = requests.slice(0, MAX_MULTICALL_REQUESTS)
+  const zeroHashRequestsData = zeroHashRequests.map(({ r }) => {
+    return {
+      target: consumer.address,
+      callData: consumer.interface.encodeFunctionData("requestedHash", [r]),
+    };
+  });
+
+  const { returnData: zeroHashReturnData } = (await multicall.callStatic.aggregate(
+    zeroHashRequestsData
+  )) as { blockNumber: BigNumber; returnData: string[] };
+  requests = requests.filter((_, index) => {
+    if (index >= MAX_MULTICALL_REQUESTS) return true;
+    const isValidHash = zeroHashReturnData[index] === requests[index].o;
+    return isValidHash;
+  });
+
 
   await storage.set("requests", JSON.stringify(requests));
   await storage.set("lastBlock", lastBlock.toString());
@@ -150,14 +170,13 @@ Web3Function.onRun(async (context: Web3FunctionContext) => {
     Math.random() * Math.min(MAX_MULTICALL_REQUESTS, requests.length)
   );
   const requestToFulfill = requests[randomRequestIndex];
-
   const logsToProcess = await provider.getLogs({
     address: consumerAddress,
     blockHash: requestToFulfill.h,
   });
 
   const logToProcess = logsToProcess.find(
-    (l) => l.logIndex == requestToFulfill.i
+    (l) => l.logIndex === requestToFulfill.i
   );
 
   if (logsToProcess.length === 0 || !logToProcess) {
