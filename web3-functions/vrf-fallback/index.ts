@@ -170,7 +170,6 @@ Web3Function.onRun(async (context: Web3FunctionContext) => {
     Math.random() * Math.min(MAX_MULTICALL_REQUESTS, requests.length)
   );
   const requestToFulfill = requests[randomRequestIndex];
-  console.log(requests[randomRequestIndex])
   const logsToProcess = await provider.getLogs({
     address: consumerAddress,
     blockHash: requestToFulfill.h,
